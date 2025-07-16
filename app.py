@@ -1,37 +1,58 @@
-import sqlite3
+import os
 import json
 from mcp.server.fastmcp import FastMCP
+from starlette.responses import JSONResponse
 
-# Initialize SQLite DB with OSDU sample data
-def init_db():
-    conn = sqlite3.connect('osdu.db')
-    c = conn.cursor()
-    
-    # Create tables based on simplified OSDU schemas
-    c.execute('''CREATE TABLE IF NOT EXISTS wells 
-                 (id TEXT PRIMARY KEY, facility_name TEXT, operator TEXT, location TEXT)''')  # location as JSON string
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS trajectories 
-                 (id TEXT PRIMARY KEY, well_id TEXT, stations TEXT)''')  # stations as JSON string
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS casings 
-                 (id TEXT PRIMARY KEY, well_id TEXT, top_depth REAL, bottom_depth REAL, diameter REAL)''')
-    
-    # Insert sample data (OSDU-like)
-    c.execute("INSERT OR IGNORE INTO wells VALUES ('well1', 'Well A', 'OperatorX', '{\"lat\": 29.75, \"lon\": -95.48}')")
-    c.execute("INSERT OR IGNORE INTO wells VALUES ('well2', 'Well B', 'OperatorY', '{\"lat\": 30.12, \"lon\": -96.34}')")
-    
-    c.execute("INSERT OR IGNORE INTO trajectories VALUES ('traj1', 'well1', '[{\"md\": 0.0, \"tvd\": 0.0, \"incl\": 0.0, \"azi\": 0.0}, {\"md\": 1000.0, \"tvd\": 900.0, \"incl\": 10.0, \"azi\": 45.0}]')")
-    c.execute("INSERT OR IGNORE INTO trajectories VALUES ('traj2', 'well2', '[{\"md\": 0.0, \"tvd\": 0.0, \"incl\": 0.0, \"azi\": 0.0}, {\"md\": 1500.0, \"tvd\": 1300.0, \"incl\": 15.0, \"azi\": 90.0}]')")
-    
-    c.execute("INSERT OR IGNORE INTO casings VALUES ('casing1', 'well1', 0.0, 500.0, 9.625)")
-    c.execute("INSERT OR IGNORE INTO casings VALUES ('casing1b', 'well1', 500.0, 1000.0, 7.0)")  # Added extra casing for well1 to demo listing
-    c.execute("INSERT OR IGNORE INTO casings VALUES ('casing2', 'well2', 0.0, 700.0, 7.0)")
-    
-    conn.commit()
-    conn.close()
+# Persistent file path (use /home in Azure App Service for persistence)
+PERSIST_FILE = os.path.join('/home', 'osdu_data.json') if os.getenv('WEBSITE_HOSTNAME') else 'osdu_data.json'  # Local fallback
 
-init_db()  # Run DB init on startup
+# In-memory data stores (replacing SQLite for simplicity)
+wells = {}
+trajectories = {}
+casings = {}
+
+# Load data from persistent JSON file into memory on startup
+def load_data():
+    global wells, trajectories, casings
+    if os.path.exists(PERSIST_FILE):
+        with open(PERSIST_FILE, 'r') as f:
+            data = json.load(f)
+            wells = {w['id']: w for w in data.get('wells', [])}
+            trajectories = {t['id']: t for t in data.get('trajectories', [])}
+            casings = {c['id']: c for c in data.get('casings', [])}
+    else:
+        # If no file, initialize sample data and save
+        init_data()
+
+# Initialize sample OSDU data and save to file
+def init_data():
+    global wells, trajectories, casings
+    wells = {
+        'well1': {"id": "well1", "facility_name": "Well A", "operator": "OperatorX", "location": {"lat": 29.75, "lon": -95.48}},
+        'well2': {"id": "well2", "facility_name": "Well B", "operator": "OperatorY", "location": {"lat": 30.12, "lon": -96.34}}
+    }
+    trajectories = {
+        'traj1': {"id": "traj1", "well_id": "well1", "stations": [{"md": 0.0, "tvd": 0.0, "incl": 0.0, "azi": 0.0}, {"md": 1000.0, "tvd": 900.0, "incl": 10.0, "azi": 45.0}]},
+        'traj2': {"id": "traj2", "well_id": "well2", "stations": [{"md": 0.0, "tvd": 0.0, "incl": 0.0, "azi": 0.0}, {"md": 1500.0, "tvd": 1300.0, "incl": 15.0, "azi": 90.0}]}
+    }
+    casings = {
+        'casing1': {"id": "casing1", "well_id": "well1", "top_depth": 0.0, "bottom_depth": 500.0, "diameter": 9.625},
+        'casing1b': {"id": "casing1b", "well_id": "well1", "top_depth": 500.0, "bottom_depth": 1000.0, "diameter": 7.0},
+        'casing2': {"id": "casing2", "well_id": "well2", "top_depth": 0.0, "bottom_depth": 700.0, "diameter": 7.0}
+    }
+    save_data()
+
+# Save in-memory data to persistent JSON file (call on any write operations)
+def save_data():
+    data = {
+        'wells': list(wells.values()),
+        'trajectories': list(trajectories.values()),
+        'casings': list(casings.values())
+    }
+    with open(PERSIST_FILE, 'w') as f:
+        json.dump(data, f)
+
+load_data()  # Load on startup (init and save if no file)
 
 # Create the MCP server instance with stateless HTTP enabled
 mcp = FastMCP(name="OsduMCPDemo", version="1.0.0", stateless_http=True)
@@ -46,23 +67,10 @@ def add_numbers(a: int, b: int) -> int:
 @mcp.tool()
 def get_casings_for_well(well_id: str) -> list:
     """Retrieves a list of all casings for a given well ID."""
-    conn = sqlite3.connect('osdu.db')
-    c = conn.cursor()
-    c.execute("SELECT * FROM casings WHERE well_id=?", (well_id,))
-    rows = c.fetchall()
-    conn.close()
-    if rows:
-        return [
-            {
-                "id": row[0],
-                "well_id": row[1],
-                "top_depth": row[2],
-                "bottom_depth": row[3],
-                "diameter": row[4]
-            } for row in rows
-        ]
-    else:
+    result = [c for c in casings.values() if c['well_id'] == well_id]
+    if not result:
         raise ValueError(f"No casings found for well {well_id}")
+    return result
 
 # Original simple resource
 @mcp.resource("greeting://{name}")
@@ -81,62 +89,41 @@ def generate_greeting(name: str, style: str = "friendly") -> str:
     }
     return f"{styles.get(style, styles['friendly'])} for {name}."
 
-# New OSDU Well resource (retrieve by ID)
+# New OSDU Well resource (retrieve by ID from memory)
 @mcp.resource("osdu:well://{well_id}")
 def get_well(well_id: str) -> dict:
     """Retrieves OSDU Well data by ID."""
-    conn = sqlite3.connect('osdu.db')
-    c = conn.cursor()
-    c.execute("SELECT * FROM wells WHERE id=?", (well_id,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {
-            "id": row[0],
-            "facility_name": row[1],
-            "operator": row[2],
-            "location": json.loads(row[3])
-        }
-    else:
-        raise ValueError(f"Well {well_id} not found")
+    if well_id in wells:
+        return wells[well_id]
+    raise ValueError(f"Well {well_id} not found")
 
-# New OSDU WellboreTrajectory resource (retrieve by ID)
+# New OSDU WellboreTrajectory resource (retrieve by ID from memory)
 @mcp.resource("osdu:trajectory://{traj_id}")
 def get_trajectory(traj_id: str) -> dict:
     """Retrieves OSDU WellboreTrajectory data by ID."""
-    conn = sqlite3.connect('osdu.db')
-    c = conn.cursor()
-    c.execute("SELECT * FROM trajectories WHERE id=?", (traj_id,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {
-            "id": row[0],
-            "well_id": row[1],
-            "stations": json.loads(row[2])
-        }
-    else:
-        raise ValueError(f"Trajectory {traj_id} not found")
+    if traj_id in trajectories:
+        return trajectories[traj_id]
+    raise ValueError(f"Trajectory {traj_id} not found")
 
-# New OSDU Casing resource (retrieve by ID)
+# New OSDU Casing resource (retrieve by ID from memory)
 @mcp.resource("osdu:casing://{casing_id}")
 def get_casing(casing_id: str) -> dict:
     """Retrieves OSDU Casing data by ID."""
-    conn = sqlite3.connect('osdu.db')
-    c = conn.cursor()
-    c.execute("SELECT * FROM casings WHERE id=?", (casing_id,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {
-            "id": row[0],
-            "well_id": row[1],
-            "top_depth": row[2],
-            "bottom_depth": row[3],
-            "diameter": row[4]
-        }
-    else:
-        raise ValueError(f"Casing {casing_id} not found")
+    if casing_id in casings:
+        return casings[casing_id]
+    raise ValueError(f"Casing {casing_id} not found")
 
 # Expose the streamable HTTP ASGI app (mounted at /mcp by default)
 app = mcp.streamable_http_app()
+
+# Add a root route for sanity check
+async def root(request):
+    status = "Data loaded successfully." if wells or trajectories or casings else "Data failed to load."
+    counts = {
+        "wells": len(wells),
+        "trajectories": len(trajectories),
+        "casings": len(casings)
+    }
+    return JSONResponse({"status": status, "record_counts": counts})
+
+app.add_route("/", root, methods=["GET"])
