@@ -1,12 +1,19 @@
 import os
 import json
+import logging
+import uvicorn
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import JSONResponse
+from starlette.routing import Route
+
+# Set up logging to catch startup issues
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # Persistent file path (use /home in Azure App Service for persistence)
 PERSIST_FILE = os.path.join('/home', 'osdu_data.json') if os.getenv('WEBSITE_HOSTNAME') else 'osdu_data.json'  # Local fallback
 
-# In-memory data stores (replacing SQLite for simplicity)
+# In-memory data stores
 wells = {}
 trajectories = {}
 casings = {}
@@ -14,15 +21,20 @@ casings = {}
 # Load data from persistent JSON file into memory on startup
 def load_data():
     global wells, trajectories, casings
-    if os.path.exists(PERSIST_FILE):
-        with open(PERSIST_FILE, 'r') as f:
-            data = json.load(f)
-            wells = {w['id']: w for w in data.get('wells', [])}
-            trajectories = {t['id']: t for t in data.get('trajectories', [])}
-            casings = {c['id']: c for c in data.get('casings', [])}
-    else:
-        # If no file, initialize sample data and save
-        init_data()
+    try:
+        if os.path.exists(PERSIST_FILE):
+            logger.debug(f"Loading data from {PERSIST_FILE}")
+            with open(PERSIST_FILE, 'r') as f:
+                data = json.load(f)
+                wells = {w['id']: w for w in data.get('wells', [])}
+                trajectories = {t['id']: t for t in data.get('trajectories', [])}
+                casings = {c['id']: c for c in data.get('casings', [])}
+        else:
+            logger.debug("No persistent file found, initializing sample data")
+            init_data()
+    except Exception as e:
+        logger.error(f"Failed to load data: {e}")
+        raise
 
 # Initialize sample OSDU data and save to file
 def init_data():
@@ -42,20 +54,71 @@ def init_data():
     }
     save_data()
 
-# Save in-memory data to persistent JSON file (call on any write operations)
+# Save in-memory data to persistent JSON file
 def save_data():
-    data = {
-        'wells': list(wells.values()),
-        'trajectories': list(trajectories.values()),
-        'casings': list(casings.values())
-    }
-    with open(PERSIST_FILE, 'w') as f:
-        json.dump(data, f)
+    try:
+        data = {
+            'wells': list(wells.values()),
+            'trajectories': list(trajectories.values()),
+            'casings': list(casings.values())
+        }
+        with open(PERSIST_FILE, 'w') as f:
+            json.dump(data, f)
+        logger.debug(f"Data saved to {PERSIST_FILE}")
+    except Exception as e:
+        logger.error(f"Failed to save data: {e}")
+        raise
 
-load_data()  # Load on startup (init and save if no file)
+load_data()  # Load on startup
 
 # Create the MCP server instance with stateless HTTP enabled
-mcp = FastMCP(name="OsduMCPDemo", version="1.0.0", stateless_http=True)
+try:
+    mcp = FastMCP(name="OsduMCPDemo", version="1.0.0", stateless_http=True)
+    logger.debug("FastMCP initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize FastMCP: {e}")
+    raise
+
+# Custom endpoint to list resource templates
+async def list_resources(request):
+    """Lists resource templates for discovery."""
+    logger.debug("Handling resources-list request")
+    resources = [
+        {
+            "uri": "greeting://{name}",
+            "name": "Greeting Resource",
+            "description": "Returns a personalized greeting message. Replace {name} with a name.",
+            "mimeType": "text/plain"
+        },
+        {
+            "uri": "osdu:well://{well_id}",
+            "name": "OSDU Well Resource",
+            "description": "Retrieves OSDU Well data by ID. Replace {well_id} with a well ID (e.g., well1).",
+            "mimeType": "application/json"
+        },
+        {
+            "uri": "osdu:trajectory://{traj_id}",
+            "name": "OSDU WellboreTrajectory Resource",
+            "description": "Retrieves OSDU WellboreTrajectory data by ID. Replace {traj_id} with a trajectory ID (e.g., traj1).",
+            "mimeType": "application/json"
+        },
+        {
+            "uri": "osdu:casing://{casing_id}",
+            "name": "OSDU Casing Resource",
+            "description": "Retrieves OSDU Casing data by ID. Replace {casing_id} with a casing ID (e.g., casing1).",
+            "mimeType": "application/json"
+        }
+    ]
+    # Directly return JSON-RPC response
+    return JSONResponse({
+        "jsonrpc": "2.0",
+        "result": {"resources": resources, "nextCursor": None},
+        "id": 1
+    })
+
+# Create the ASGI app and add custom endpoint
+app = mcp.streamable_http_app()
+app.routes.append(Route("/resources-list", list_resources, methods=["POST"]))
 
 # Original simple tool
 @mcp.tool()
@@ -113,9 +176,6 @@ def get_casing(casing_id: str) -> dict:
         return casings[casing_id]
     raise ValueError(f"Casing {casing_id} not found")
 
-# Expose the streamable HTTP ASGI app (mounted at /mcp by default)
-app = mcp.streamable_http_app()
-
 # Add a root route for sanity check
 async def root(request):
     status = "Data loaded successfully." if wells or trajectories or casings else "Data failed to load."
@@ -127,3 +187,8 @@ async def root(request):
     return JSONResponse({"status": status, "record_counts": counts})
 
 app.add_route("/", root, methods=["GET"])
+
+# Run the server locally for testing
+if __name__ == "__main__":
+    logger.debug("Starting Uvicorn server")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
