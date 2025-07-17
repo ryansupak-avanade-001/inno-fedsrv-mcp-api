@@ -7,6 +7,7 @@ import uvicorn
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import JSONResponse
 from starlette.routing import Route
+from starlette.middleware.base import BaseHTTPMiddleware  # Added for middleware support
 
 # Set up logging to catch startup issues
 logging.basicConfig(level=logging.DEBUG)
@@ -48,7 +49,7 @@ def init_data():
     trajectories = {
         'traj1': {"id": "traj1", "well_id": "well1", "stations": [{"md": 0.0, "tvd": 0.0, "incl": 0.0, "azi": 0.0}, {"md": 1000.0, "tvd": 900.0, "incl": 10.0, "azi": 45.0}]},
         'traj2': {"id": "traj2", "well_id": "well2", "stations": [{"md": 0.0, "tvd": 0.0, "incl": 0.0, "azi": 0.0}, {"md": 1500.0, "tvd": 1300.0, "incl": 15.0, "azi": 90.0}]}
-    }  # Added missing closing brace for trajectories dict
+    }
     casings = {
         'casing1': {"id": "casing1", "well_id": "well1", "top_depth": 0.0, "bottom_depth": 500.0, "diameter": 9.625},
         'casing1b': {"id": "casing1b", "well_id": "well1", "top_depth": 500.0, "bottom_depth": 1000.0, "diameter": 7.0},
@@ -81,46 +82,50 @@ except Exception as e:
     logger.error(f"Failed to initialize FastMCP: {e}")
     raise
 
-# Custom endpoint to list resource templates
-async def list_resources(request):
-    """Lists resource templates for discovery."""
-    logger.debug("Handling resources-list request")
-    resources = [
-        {
-            "uri": "greeting://{name}",
-            "name": "Greeting Resource",
-            "description": "Returns a personalized greeting message. Replace {name} with a name.",
-            "mimeType": "text/plain"
-        },
-        {
-            "uri": "osdu:wells",  # Changed to non-parameterized URI for collection
-            "name": "OSDU Wells Resource",  # Changed to plural for collection
-            "description": "Retrieves all OSDU Well data.",  # Changed to describe full collection retrieval
-            "mimeType": "application/json"
-        },
-        {
-            "uri": "osdu:trajectories",  # Changed to non-parameterized URI for collection
-            "name": "OSDU WellboreTrajectories Resource",  # Changed to plural for collection
-            "description": "Retrieves all OSDU WellboreTrajectory data.",  # Changed to describe full collection retrieval
-            "mimeType": "application/json"
-        },
-        {
-            "uri": "osdu:casings",  # Changed to non-parameterized URI for collection
-            "name": "OSDU Casings Resource",  # Changed to plural for collection
-            "description": "Retrieves all OSDU Casing data.",  # Changed to describe full collection retrieval
-            "mimeType": "application/json"
-        }
-    ]
-    # Directly return JSON-RPC response
-    return JSONResponse({
-        "jsonrpc": "2.0",
-        "result": {"resources": resources, "nextCursor": None},
-        "id": 1
-    })
-
 # Create the ASGI app and add custom endpoint
 app = mcp.streamable_http_app()
-app.routes.append(Route("/resources-list", list_resources, methods=["POST"]))
+class CustomMiddleware(BaseHTTPMiddleware):  # Added middleware class for intercepting "resources/list"
+    async def dispatch(self, request, call_next):
+        if request.method == "POST":
+            try:  # Added try for safe JSON parsing
+                payload = await request.json()
+                if payload.get("method") == "resources/list":
+                    logger.debug("Handling resources/list request")
+                    resources = [
+                        {
+                            "uri": "greeting://{name}",
+                            "name": "Greeting Resource",
+                            "description": "Returns a personalized greeting message. Replace {name} with a name.",
+                            "mimeType": "text/plain"
+                        },
+                        {
+                            "uri": "osdu:wells",
+                            "name": "OSDU Wells Resource",
+                            "description": "Retrieves all OSDU Well data.",
+                            "mimeType": "application/json"
+                        },
+                        {
+                            "uri": "osdu:trajectories",
+                            "name": "OSDU WellboreTrajectories Resource",
+                            "description": "Retrieves all OSDU WellboreTrajectory data.",
+                            "mimeType": "application/json"
+                        },
+                        {
+                            "uri": "osdu:casings",
+                            "name": "OSDU Casings Resource",
+                            "description": "Retrieves all OSDU Casing data.",
+                            "mimeType": "application/json"
+                        }
+                    ]
+                    return JSONResponse({
+                        "jsonrpc": "2.0",
+                        "result": {"resources": resources, "nextCursor": None},
+                        "id": payload.get("id", 1)
+                    })
+            except Exception as e:  # Added exception handling for non-JSON or errors
+                logger.error(f"Middleware error: {e}")
+        return await call_next(request)  # Pass to original handlers
+app.add_middleware(CustomMiddleware)  # Added to apply middleware
 
 # Original simple tool
 @mcp.tool()
@@ -128,7 +133,7 @@ def add_numbers(a: int, b: int) -> int:
     """Adds two integers together."""
     return a + b
 
-# New OSDU tool: Get all casings for a given well
+# New OSDU tool: Get all casings for a well
 @mcp.tool()
 def get_casings_for_well(well_id: str) -> list:
     """Retrieves a list of all casings for a given well ID."""
