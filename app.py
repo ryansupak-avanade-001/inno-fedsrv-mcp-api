@@ -1,3 +1,5 @@
+#app.py
+#OsduMCPDemo
 import os
 import json
 import logging
@@ -46,7 +48,7 @@ def init_data():
     trajectories = {
         'traj1': {"id": "traj1", "well_id": "well1", "stations": [{"md": 0.0, "tvd": 0.0, "incl": 0.0, "azi": 0.0}, {"md": 1000.0, "tvd": 900.0, "incl": 10.0, "azi": 45.0}]},
         'traj2': {"id": "traj2", "well_id": "well2", "stations": [{"md": 0.0, "tvd": 0.0, "incl": 0.0, "azi": 0.0}, {"md": 1500.0, "tvd": 1300.0, "incl": 15.0, "azi": 90.0}]}
-    }
+    }  # Added missing closing brace for trajectories dict
     casings = {
         'casing1': {"id": "casing1", "well_id": "well1", "top_depth": 0.0, "bottom_depth": 500.0, "diameter": 9.625},
         'casing1b': {"id": "casing1b", "well_id": "well1", "top_depth": 500.0, "bottom_depth": 1000.0, "diameter": 7.0},
@@ -91,21 +93,21 @@ async def list_resources(request):
             "mimeType": "text/plain"
         },
         {
-            "uri": "osdu:well://{well_id}",
-            "name": "OSDU Well Resource",
-            "description": "Retrieves OSDU Well data by ID. Replace {well_id} with a well ID (e.g., well1).",
+            "uri": "osdu:wells",  # Changed to non-parameterized URI for collection
+            "name": "OSDU Wells Resource",  # Changed to plural for collection
+            "description": "Retrieves all OSDU Well data.",  # Changed to describe full collection retrieval
             "mimeType": "application/json"
         },
         {
-            "uri": "osdu:trajectory://{traj_id}",
-            "name": "OSDU WellboreTrajectory Resource",
-            "description": "Retrieves OSDU WellboreTrajectory data by ID. Replace {traj_id} with a trajectory ID (e.g., traj1).",
+            "uri": "osdu:trajectories",  # Changed to non-parameterized URI for collection
+            "name": "OSDU WellboreTrajectories Resource",  # Changed to plural for collection
+            "description": "Retrieves all OSDU WellboreTrajectory data.",  # Changed to describe full collection retrieval
             "mimeType": "application/json"
         },
         {
-            "uri": "osdu:casing://{casing_id}",
-            "name": "OSDU Casing Resource",
-            "description": "Retrieves OSDU Casing data by ID. Replace {casing_id} with a casing ID (e.g., casing1).",
+            "uri": "osdu:casings",  # Changed to non-parameterized URI for collection
+            "name": "OSDU Casings Resource",  # Changed to plural for collection
+            "description": "Retrieves all OSDU Casing data.",  # Changed to describe full collection retrieval
             "mimeType": "application/json"
         }
     ]
@@ -126,7 +128,7 @@ def add_numbers(a: int, b: int) -> int:
     """Adds two integers together."""
     return a + b
 
-# New OSDU tool: Get all casings for a well
+# New OSDU tool: Get all casings for a given well
 @mcp.tool()
 def get_casings_for_well(well_id: str) -> list:
     """Retrieves a list of all casings for a given well ID."""
@@ -152,29 +154,23 @@ def generate_greeting(name: str, style: str = "friendly") -> str:
     }
     return f"{styles.get(style, styles['friendly'])} for {name}."
 
-# New OSDU Well resource (retrieve by ID from memory)
-@mcp.resource("osdu:well://{well_id}")
-def get_well(well_id: str) -> dict:
-    """Retrieves OSDU Well data by ID."""
-    if well_id in wells:
-        return wells[well_id]
-    raise ValueError(f"Well {well_id} not found")
+# New OSDU Well resource (retrieve all from memory)  # Changed comment to reflect collection
+@mcp.resource("osdu:wells")  # Changed to non-parameterized URI to expose full collection
+def get_wells() -> list:  # Changed function to return list without ID param
+    """Retrieves all OSDU Well data."""  # Changed docstring for collection
+    return list(wells.values())  # Changed to return full list from JSON data, avoiding empty/not-found handling
 
-# New OSDU WellboreTrajectory resource (retrieve by ID from memory)
-@mcp.resource("osdu:trajectory://{traj_id}")
-def get_trajectory(traj_id: str) -> dict:
-    """Retrieves OSDU WellboreTrajectory data by ID."""
-    if traj_id in trajectories:
-        return trajectories[traj_id]
-    raise ValueError(f"Trajectory {traj_id} not found")
+# New OSDU WellboreTrajectory resource (retrieve all from memory)  # Changed comment to reflect collection
+@mcp.resource("osdu:trajectories")  # Changed to non-parameterized URI to expose full collection
+def get_trajectories() -> list:  # Changed function to return list without ID param
+    """Retrieves all OSDU WellboreTrajectory data."""  # Changed docstring for collection
+    return list(trajectories.values())  # Changed to return full list from JSON data, avoiding empty/not-found handling
 
-# New OSDU Casing resource (retrieve by ID from memory)
-@mcp.resource("osdu:casing://{casing_id}")
-def get_casing(casing_id: str) -> dict:
-    """Retrieves OSDU Casing data by ID."""
-    if casing_id in casings:
-        return casings[casing_id]
-    raise ValueError(f"Casing {casing_id} not found")
+# New OSDU Casing resource (retrieve all from memory)  # Changed comment to reflect collection
+@mcp.resource("osdu:casings")  # Changed to non-parameterized URI to expose full collection
+def get_casings() -> list:  # Changed function to return list without ID param
+    """Retrieves all OSDU Casing data."""  # Changed docstring for collection
+    return list(casings.values())  # Changed to return full list from JSON data, avoiding empty/not-found handling
 
 # Add a root route for sanity check
 async def root(request):
