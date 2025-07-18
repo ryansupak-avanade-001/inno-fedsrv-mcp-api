@@ -4,12 +4,14 @@ import os
 import json
 import logging
 import uvicorn
-from mcp.server.fastmcp import FastMCP
-from starlette.responses import JSONResponse
+import asyncio
+from mcp.server import Server
+from starlette.applications import Starlette
 from starlette.routing import Route
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
-# Set up logging to catch startup issues
+# Set up logging to catch startup and request issues
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
@@ -26,7 +28,7 @@ def load_data():
     global wells, trajectories, casings
     try:
         if os.path.exists(PERSIST_FILE):
-            logger.debug(f"Loading data from {PERSIST_FILE}")
+            logger.debug("Loading data from " + PERSIST_FILE)
             with open(PERSIST_FILE, 'r') as f:
                 data = json.load(f)
                 wells = {w['id']: w for w in data.get('wells', [])}
@@ -36,7 +38,7 @@ def load_data():
             logger.debug("No persistent file found, initializing sample data")
             init_data()
     except Exception as e:
-        logger.error(f"Failed to load data: {e}")
+        logger.error("Failed to load data: " + str(e))
         raise
 
 # Initialize sample OSDU data and save to file
@@ -67,150 +69,112 @@ def save_data():
         }
         with open(PERSIST_FILE, 'w') as f:
             json.dump(data, f)
-        logger.debug(f"Data saved to {PERSIST_FILE}")
+        logger.debug("Data saved to " + PERSIST_FILE)
     except Exception as e:
-        logger.error(f"Failed to save data: {e}")
+        logger.error("Failed to save data: " + str(e))
         raise
 
 load_data()  # Load on startup
 
-# Create the MCP server instance with stateless HTTP enabled
-try:
-    mcp = FastMCP(name="OsduMCPDemo", version="1.0.0", stateless_http=True)
-    logger.debug("FastMCP initialized successfully")
-except Exception as e:
-    logger.error(f"Failed to initialize FastMCP: {e}")
-    raise
+# Define custom MCP server
+class OsduMCPServer(Server):
+    async def handle_request(self, request: dict) -> dict:
+        method = request.get("method")
+        params = request.get("params", {})
+        logger.debug("Received request: method=" + method + ", params=" + str(params))
+        if method == "initialize":
+            return {"jsonrpc": "2.0", "result": {"protocolVersion": "2024-11-05", "capabilities": {"resources": {"supported": True}, "tools": {"supported": True}, "prompts": {"supported": True}}, "serverInfo": {"name": "OsduMCPDemo", "version": "1.0.0"}}, "id": request.get("id", 1)}
+        elif method == "resources/list":
+            resources = [
+                {"uri": "greeting://{name}", "name": "Greeting Resource", "description": "Returns a personalized greeting message. Replace {name} with a name.", "mimeType": "text/plain"},
+                {"uri": "osdu:wells", "name": "OSDU Wells Resource", "description": "Retrieves all OSDU Well data.", "mimeType": "application/json"},
+                {"uri": "osdu:trajectories", "name": "OSDU WellboreTrajectories Resource", "description": "Retrieves all OSDU WellboreTrajectory data.", "mimeType": "application/json"},
+                {"uri": "osdu:casings", "name": "OSDU Casings Resource", "description": "Retrieves all OSDU Casing data.", "mimeType": "application/json"}
+            ]
+            return {"jsonrpc": "2.0", "result": {"resources": resources, "nextCursor": None}, "id": request.get("id", 1)}
+        elif method == "resources/read":
+            uri = params.get("uri", "")
+            if uri.startswith("greeting://"):
+                name = uri.split("://")[1]
+                return {"jsonrpc": "2.0", "result": "Hello, " + name + "! Welcome to the MCP demo.", "id": request.get("id", 1)}
+            resource_handlers = {
+                "osdu:wells": lambda: list(wells.values()),
+                "osdu:trajectories": lambda: list(trajectories.values()),
+                "osdu:casings": lambda: list(casings.values())
+            }
+            handler = resource_handlers.get(uri)
+            if handler:
+                try:
+                    result = handler()
+                    return {"jsonrpc": "2.0", "result": result, "id": request.get("id", 1)}
+                except Exception as e:
+                    logger.error("Resource read error for " + uri + ": " + str(e))
+                    return {"jsonrpc": "2.0", "error": {"code": -32000, "message": "Resource read error: " + str(e)}, "id": request.get("id", 1)}
+            return {"jsonrpc": "2.0", "error": {"code": -32602, "message": "Invalid resource URI: " + uri}, "id": request.get("id", 1)}
+        elif method == "tools/list":
+            tools = [
+                {"name": "add_numbers", "description": "Adds two integers together.", "inputSchema": {"properties": {"a": {"title": "A", "type": "integer"}, "b": {"title": "B", "type": "integer"}}, "required": ["a", "b"], "title": "add_numbersArguments", "type": "object"}, "outputSchema": {"properties": {"result": {"title": "Result", "type": "integer"}}, "required": ["result"], "title": "add_numbersOutput", "type": "object"}},
+                {"name": "get_casings_for_well", "description": "Retrieves a list of all casings for a given well ID.", "inputSchema": {"properties": {"well_id": {"title": "Well Id", "type": "string"}}, "required": ["well_id"], "title": "get_casings_for_wellArguments", "type": "object"}},
+                {"name": "list_all_wells", "description": "Lists all wells from the osdu:wells Resource.", "inputSchema": {}, "outputSchema": {"type": "array"}}
+            ]
+            return {"jsonrpc": "2.0", "result": {"tools": tools}, "id": request.get("id", 1)}
+        elif method == "tools/call":
+            tool_id = params.get("name", "")
+            tool_params = params.get("params", {})
+            tool_handlers = {
+                "add_numbers": lambda: tool_params["a"] + tool_params["b"],
+                "get_casings_for_well": lambda: [c for c in casings.values() if c['well_id'] == tool_params["well_id"]],
+                "list_all_wells": lambda: list(wells.values())
+            }
+            handler = tool_handlers.get(tool_id)
+            if handler:
+                try:
+                    result = handler()
+                    if tool_id == "get_casings_for_well" and not result:
+                        raise ValueError("No casings found for well " + tool_params["well_id"])
+                    return {"jsonrpc": "2.0", "result": result, "id": request.get("id", 1)}
+                except Exception as e:
+                    logger.error("Tool call error for " + tool_id + ": " + str(e))
+                    return {"jsonrpc": "2.0", "error": {"code": -32000, "message": "Tool call error: " + str(e)}, "id": request.get("id", 1)}
+            return {"jsonrpc": "2.0", "error": {"code": -32602, "message": "Invalid tool name: " + tool_id}, "id": request.get("id", 1)}
+        elif method == "prompts/list":
+            prompts = [
+                {"name": "generate_greeting", "description": "Generates a prompt for creating a greeting in a specified style.", "arguments": [{"name": "name", "required": True}, {"name": "style", "required": False}]}
+            ]
+            return {"jsonrpc": "2.0", "result": {"prompts": prompts}, "id": request.get("id", 1)}
+        elif method == "prompts/get":
+            prompt_id = params.get("name", "")
+            prompt_params = params.get("params", {})
+            if prompt_id == "generate_greeting":
+                styles = {
+                    "friendly": "Write a warm and friendly greeting",
+                    "formal": "Write a professional and formal greeting",
+                    "casual": "Write a relaxed and casual greeting"
+                }
+                style = prompt_params.get("style", "friendly")
+                return {"jsonrpc": "2.0", "result": styles.get(style, styles['friendly']) + " for " + prompt_params.get("name", "") + ".", "id": request.get("id", 1)}
+            return {"jsonrpc": "2.0", "error": {"code": -32602, "message": "Invalid prompt name: " + prompt_id}, "id": request.get("id", 1)}
+        return {"jsonrpc": "2.0", "error": {"code": -32601, "message": "Method not found: " + method}, "id": request.get("id", 1)}
 
-# Create the ASGI app and add custom endpoint
-app = mcp.streamable_http_app()
-class CustomMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        if request.method == "POST":
-            try:
-                payload = await request.json()
-                # Skip strict Accept header validation for resources/list and resources/read
-                if payload.get("method") == "resources/list":
-                    logger.debug("Handling resources/list request")
-                    resources = [
-                        {
-                            "uri": "greeting://{name}",
-                            "name": "Greeting Resource",
-                            "description": "Returns a personalized greeting message. Replace {name} with a name.",
-                            "mimeType": "text/plain"
-                        },
-                        {
-                            "uri": "osdu:wells",
-                            "name": "OSDU Wells Resource",
-                            "description": "Retrieves all OSDU Well data.",
-                            "mimeType": "application/json"
-                        },
-                        {
-                            "uri": "osdu:trajectories",
-                            "name": "OSDU WellboreTrajectories Resource",
-                            "description": "Retrieves all OSDU WellboreTrajectory data.",
-                            "mimeType": "application/json"
-                        },
-                        {
-                            "uri": "osdu:casings",
-                            "name": "OSDU Casings Resource",
-                            "description": "Retrieves all OSDU Casing data.",
-                            "mimeType": "application/json"
-                        }
-                    ]
-                    return JSONResponse({
-                        "jsonrpc": "2.0",
-                        "result": {"resources": resources, "nextCursor": None},
-                        "id": payload.get("id", 1)
-                    })
-                # Relax Accept header validation for resources/read to allow just application/json
-                if payload.get("method") == "resources/read":
-                    logger.debug("Handling resources/read request")
-                    uri = payload.get("params", {}).get("uri", "")
-                    resource_handlers = {  # Define handlers for known resources
-                        "osdu:wells": get_wells,
-                        "osdu:trajectories": get_trajectories,
-                        "osdu:casings": get_casings,
-                        "greeting": lambda: get_greeting(uri.split("://")[1]) if uri.startswith("greeting://") else None
-                    }
-                    handler = resource_handlers.get(uri, resource_handlers.get("greeting") if uri.startswith("greeting://") else None)
-                    if handler:
-                        try:
-                            result = handler()
-                            return JSONResponse({
-                                "jsonrpc": "2.0",
-                                "result": result,
-                                "id": payload.get("id", 1)
-                            })
-                        except Exception as e:
-                            return JSONResponse({
-                                "jsonrpc": "2.0",
-                                "error": {"code": -32000, "message": f"Resource read error: {str(e)}"},
-                                "id": payload.get("id", 1)
-                            })
-                    return JSONResponse({
-                        "jsonrpc": "2.0",
-                        "error": {"code": -32602, "message": f"Invalid resource URI: {uri}"},
-                        "id": payload.get("id", 1)
-                    })
-            except Exception as e:
-                logger.error(f"Middleware error: {e}")
-        else:
-            return await call_next(request)  # Pass to original handlers
-        return await call_next(request)  # Pass to original handlers
-app.add_middleware(CustomMiddleware)
+# Create MCP server
+mcp = OsduMCPServer(name="OsduMCPDemo", version="1.0.0")
 
-# Original simple tool
-@mcp.tool()
-def add_numbers(a: int, b: int) -> int:
-    """Adds two integers together."""
-    return a + b
+# Add HTTP routes
+async def mcp_handler(request: Request):
+    try:
+        payload = await request.body()
+        logger.debug("Received MCP request: " + payload.decode())
+        message = json.loads(payload.decode())
+        response = await mcp.handle_request(message)
+        logger.debug("Sending MCP response: " + json.dumps(response))
+        return JSONResponse(response, headers={"Content-Type": "application/json"})
+    except json.JSONDecodeError as e:
+        logger.error("Invalid JSON in request: " + str(e))
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    except Exception as e:
+        logger.error("MCP handler error: " + str(e))
+        return JSONResponse({"error": "Internal Server Error"}, status_code=500)
 
-# New OSDU tool: Get all casings for a well
-@mcp.tool()
-def get_casings_for_well(well_id: str) -> list:
-    """Retrieves a list of all casings for a given well ID."""
-    result = [c for c in casings.values() if c['well_id'] == well_id]
-    if not result:
-        raise ValueError(f"No casings found for well {well_id}")
-    return result
-
-# Original simple resource
-@mcp.resource("greeting://{name}")
-def get_greeting(name: str) -> str:
-    """Returns a personalized greeting message."""
-    return f"Hello, {name}! Welcome to the MCP demo."
-
-# Original simple prompt
-@mcp.prompt()
-def generate_greeting(name: str, style: str = "friendly") -> str:
-    """Generates a prompt for creating a greeting in a specified style."""
-    styles = {
-        "friendly": "Write a warm and friendly greeting",
-        "formal": "Write a professional and formal greeting",
-        "casual": "Write a relaxed and casual greeting",
-    }
-    return f"{styles.get(style, styles['friendly'])} for {name}."
-
-# New OSDU Well resource (retrieve all from memory)
-@mcp.resource("osdu:wells")
-def get_wells() -> list:
-    """Retrieves all OSDU Well data."""
-    return list(wells.values())
-
-# New OSDU WellboreTrajectory resource (retrieve all from memory)
-@mcp.resource("osdu:trajectories")
-def get_trajectories() -> list:
-    """Retrieves all OSDU WellboreTrajectory data."""
-    return list(trajectories.values())
-
-# New OSDU Casing resource (retrieve all from memory)
-@mcp.resource("osdu:casings")
-def get_casings() -> list:
-    """Retrieves all OSDU Casing data."""
-    return list(casings.values())
-
-# Add a root route for sanity check
 async def root(request):
     status = "Data loaded successfully." if wells or trajectories or casings else "Data failed to load."
     counts = {
@@ -220,11 +184,12 @@ async def root(request):
     }
     return JSONResponse({"status": status, "record_counts": counts})
 
-app.add_route("/", root, methods=["GET"])
+app = Starlette(routes=[
+    Route("/mcp/", mcp_handler, methods=["POST"]),
+    Route("/", root, methods=["GET"])
+])
 
-# Run the server locally for testing
+# Run the server
 if __name__ == "__main__":
     logger.debug("Starting Uvicorn server")
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-# Middleware allows 'resources/read' to accept 'application/json', aligning with JSON-RPC standards.
