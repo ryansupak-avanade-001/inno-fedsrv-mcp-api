@@ -7,7 +7,7 @@ import uvicorn
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import JSONResponse
 from starlette.routing import Route
-from starlette.middleware.base import BaseHTTPMiddleware  # Added for middleware support
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Set up logging to catch startup issues
 logging.basicConfig(level=logging.DEBUG)
@@ -84,11 +84,12 @@ except Exception as e:
 
 # Create the ASGI app and add custom endpoint
 app = mcp.streamable_http_app()
-class CustomMiddleware(BaseHTTPMiddleware):  # Added middleware class for intercepting "resources/list"
+class CustomMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         if request.method == "POST":
-            try:  # Added try for safe JSON parsing
+            try:
                 payload = await request.json()
+                # Skip strict Accept header validation for resources/list and resources/read
                 if payload.get("method") == "resources/list":
                     logger.debug("Handling resources/list request")
                     resources = [
@@ -122,10 +123,42 @@ class CustomMiddleware(BaseHTTPMiddleware):  # Added middleware class for interc
                         "result": {"resources": resources, "nextCursor": None},
                         "id": payload.get("id", 1)
                     })
-            except Exception as e:  # Added exception handling for non-JSON or errors
+                # Relax Accept header validation for resources/read to allow just application/json
+                if payload.get("method") == "resources/read":
+                    logger.debug("Handling resources/read request")
+                    uri = payload.get("params", {}).get("uri", "")
+                    resource_handlers = {  # Define handlers for known resources
+                        "osdu:wells": get_wells,
+                        "osdu:trajectories": get_trajectories,
+                        "osdu:casings": get_casings,
+                        "greeting": lambda: get_greeting(uri.split("://")[1]) if uri.startswith("greeting://") else None
+                    }
+                    handler = resource_handlers.get(uri, resource_handlers.get("greeting") if uri.startswith("greeting://") else None)
+                    if handler:
+                        try:
+                            result = handler()
+                            return JSONResponse({
+                                "jsonrpc": "2.0",
+                                "result": result,
+                                "id": payload.get("id", 1)
+                            })
+                        except Exception as e:
+                            return JSONResponse({
+                                "jsonrpc": "2.0",
+                                "error": {"code": -32000, "message": f"Resource read error: {str(e)}"},
+                                "id": payload.get("id", 1)
+                            })
+                    return JSONResponse({
+                        "jsonrpc": "2.0",
+                        "error": {"code": -32602, "message": f"Invalid resource URI: {uri}"},
+                        "id": payload.get("id", 1)
+                    })
+            except Exception as e:
                 logger.error(f"Middleware error: {e}")
+        else:
+            return await call_next(request)  # Pass to original handlers
         return await call_next(request)  # Pass to original handlers
-app.add_middleware(CustomMiddleware)  # Added to apply middleware
+app.add_middleware(CustomMiddleware)
 
 # Original simple tool
 @mcp.tool()
@@ -159,23 +192,23 @@ def generate_greeting(name: str, style: str = "friendly") -> str:
     }
     return f"{styles.get(style, styles['friendly'])} for {name}."
 
-# New OSDU Well resource (retrieve all from memory)  # Changed comment to reflect collection
-@mcp.resource("osdu:wells")  # Changed to non-parameterized URI to expose full collection
-def get_wells() -> list:  # Changed function to return list without ID param
-    """Retrieves all OSDU Well data."""  # Changed docstring for collection
-    return list(wells.values())  # Changed to return full list from JSON data, avoiding empty/not-found handling
+# New OSDU Well resource (retrieve all from memory)
+@mcp.resource("osdu:wells")
+def get_wells() -> list:
+    """Retrieves all OSDU Well data."""
+    return list(wells.values())
 
-# New OSDU WellboreTrajectory resource (retrieve all from memory)  # Changed comment to reflect collection
-@mcp.resource("osdu:trajectories")  # Changed to non-parameterized URI to expose full collection
-def get_trajectories() -> list:  # Changed function to return list without ID param
-    """Retrieves all OSDU WellboreTrajectory data."""  # Changed docstring for collection
-    return list(trajectories.values())  # Changed to return full list from JSON data, avoiding empty/not-found handling
+# New OSDU WellboreTrajectory resource (retrieve all from memory)
+@mcp.resource("osdu:trajectories")
+def get_trajectories() -> list:
+    """Retrieves all OSDU WellboreTrajectory data."""
+    return list(trajectories.values())
 
-# New OSDU Casing resource (retrieve all from memory)  # Changed comment to reflect collection
-@mcp.resource("osdu:casings")  # Changed to non-parameterized URI to expose full collection
-def get_casings() -> list:  # Changed function to return list without ID param
-    """Retrieves all OSDU Casing data."""  # Changed docstring for collection
-    return list(casings.values())  # Changed to return full list from JSON data, avoiding empty/not-found handling
+# New OSDU Casing resource (retrieve all from memory)
+@mcp.resource("osdu:casings")
+def get_casings() -> list:
+    """Retrieves all OSDU Casing data."""
+    return list(casings.values())
 
 # Add a root route for sanity check
 async def root(request):
@@ -193,3 +226,5 @@ app.add_route("/", root, methods=["GET"])
 if __name__ == "__main__":
     logger.debug("Starting Uvicorn server")
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# Middleware allows 'resources/read' to accept 'application/json', aligning with JSON-RPC standards.
