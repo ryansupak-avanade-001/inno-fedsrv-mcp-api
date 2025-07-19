@@ -4,16 +4,18 @@ import os
 import json
 import logging
 import asyncio
-# Ensure all dependencies are installed from requirements.txt
+# Ensure mcp[server]>=1.8.0 and hypercorn>=0.17.3 are installed in requirements.txt
 try:
     from mcp.server import Server
 except ImportError as e:
     logger.error("Failed to import mcp.server: " + str(e))
     raise
 try:
-    import uvicorn
+    import hypercorn.asyncio
+    from hypercorn.config import Config
 except ImportError as e:
-    logger.error("Uvicorn not found, falling back to Starlette server: " + str(e))
+    logger.error("Hypercorn not found: " + str(e))
+    raise
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.requests import Request
@@ -91,7 +93,13 @@ class OsduMCPServer(Server):
         params = request.get("params", {})
         logger.debug("Received request: method=" + method + ", params=" + str(params))
         if method == "initialize":
-            return {"jsonrpc": "2.0", "result": {"protocolVersion": "2024-11-05", "capabilities": {"resources": {"supported": True}, "tools": {"supported": True}, "prompts": {"supported": True}}, "serverInfo": {"name": "OsduMCPDemo", "version": "1.0.0"}}, "id": request.get("id", 1)}
+            response = {"jsonrpc": "2.0", "result": {"protocolVersion": "2024-11-05", "capabilities": {"resources": {"supported": True}, "tools": {"supported": True}, "prompts": {"supported": True}}, "serverInfo": {"name": "OsduMCPDemo", "version": "1.0.0"}}, "id": request.get("id", 1)}
+            logger.debug("Returning response for " + method + ": " + json.dumps(response))
+            return response
+        elif method == "notifications/initialized":
+            response = {"jsonrpc": "2.0", "result": {}, "id": request.get("id", 1)}
+            logger.debug("Returning response for " + method + ": " + json.dumps(response))
+            return response
         elif method == "resources/list":
             resources = [
                 {"uri": "greeting://{name}", "name": "Greeting Resource", "description": "Returns a personalized greeting message. Replace {name} with a name.", "mimeType": "text/plain"},
@@ -99,12 +107,16 @@ class OsduMCPServer(Server):
                 {"uri": "osdu:trajectories", "name": "OSDU WellboreTrajectories Resource", "description": "Retrieves all OSDU WellboreTrajectory data.", "mimeType": "application/json"},
                 {"uri": "osdu:casings", "name": "OSDU Casings Resource", "description": "Retrieves all OSDU Casing data.", "mimeType": "application/json"}
             ]
-            return {"jsonrpc": "2.0", "result": {"resources": resources, "nextCursor": None}, "id": request.get("id", 1)}
+            response = {"jsonrpc": "2.0", "result": {"resources": resources, "nextCursor": None}, "id": request.get("id", 1)}
+            logger.debug("Returning response for " + method + ": " + json.dumps(response))
+            return response
         elif method == "resources/read":
             uri = params.get("uri", "")
             if uri.startswith("greeting://"):
                 name = uri.split("://")[1]
-                return {"jsonrpc": "2.0", "result": "Hello, " + name + "! Welcome to the MCP demo.", "id": request.get("id", 1)}
+                response = {"jsonrpc": "2.0", "result": "Hello, " + name + "! Welcome to the MCP demo.", "id": request.get("id", 1)}
+                logger.debug("Returning response for " + method + ": " + json.dumps(response))
+                return response
             resource_handlers = {
                 "osdu:wells": lambda: list(wells.values()),
                 "osdu:trajectories": lambda: list(trajectories.values()),
@@ -114,18 +126,26 @@ class OsduMCPServer(Server):
             if handler:
                 try:
                     result = handler()
-                    return {"jsonrpc": "2.0", "result": result, "id": request.get("id", 1)}
+                    response = {"jsonrpc": "2.0", "result": result, "id": request.get("id", 1)}
+                    logger.debug("Returning response for " + method + ": " + json.dumps(response))
+                    return response
                 except Exception as e:
                     logger.error("Resource read error for " + uri + ": " + str(e))
-                    return {"jsonrpc": "2.0", "error": {"code": -32000, "message": "Resource read error: " + str(e)}, "id": request.get("id", 1)}
-            return {"jsonrpc": "2.0", "error": {"code": -32602, "message": "Invalid resource URI: " + uri}, "id": request.get("id", 1)}
+                    response = {"jsonrpc": "2.0", "error": {"code": -32000, "message": "Resource read error: " + str(e)}, "id": request.get("id", 1)}
+                    logger.debug("Returning response for " + method + ": " + json.dumps(response))
+                    return response
+            response = {"jsonrpc": "2.0", "error": {"code": -32602, "message": "Invalid resource URI: " + uri}, "id": request.get("id", 1)}
+            logger.debug("Returning response for " + method + ": " + json.dumps(response))
+            return response
         elif method == "tools/list":
             tools = [
                 {"name": "add_numbers", "description": "Adds two integers together.", "inputSchema": {"properties": {"a": {"title": "A", "type": "integer"}, "b": {"title": "B", "type": "integer"}}, "required": ["a", "b"], "title": "add_numbersArguments", "type": "object"}, "outputSchema": {"properties": {"result": {"title": "Result", "type": "integer"}}, "required": ["result"], "title": "add_numbersOutput", "type": "object"}},
                 {"name": "get_casings_for_well", "description": "Retrieves a list of all casings for a given well ID.", "inputSchema": {"properties": {"well_id": {"title": "Well Id", "type": "string"}}, "required": ["well_id"], "title": "get_casings_for_wellArguments", "type": "object"}},
                 {"name": "list_all_wells", "description": "Lists all wells from the osdu:wells Resource.", "inputSchema": {}, "outputSchema": {"type": "array"}}
             ]
-            return {"jsonrpc": "2.0", "result": {"tools": tools}, "id": request.get("id", 1)}
+            response = {"jsonrpc": "2.0", "result": {"tools": tools}, "id": request.get("id", 1)}
+            logger.debug("Returning response for " + method + ": " + json.dumps(response))
+            return response
         elif method == "tools/call":
             tool_id = params.get("name", "")
             tool_params = params.get("params", {})
@@ -140,16 +160,24 @@ class OsduMCPServer(Server):
                     result = handler()
                     if tool_id == "get_casings_for_well" and not result:
                         raise ValueError("No casings found for well " + tool_params["well_id"])
-                    return {"jsonrpc": "2.0", "result": result, "id": request.get("id", 1)}
+                    response = {"jsonrpc": "2.0", "result": result, "id": request.get("id", 1)}
+                    logger.debug("Returning response for " + method + ": " + json.dumps(response))
+                    return response
                 except Exception as e:
                     logger.error("Tool call error for " + tool_id + ": " + str(e))
-                    return {"jsonrpc": "2.0", "error": {"code": -32000, "message": "Tool call error: " + str(e)}, "id": request.get("id", 1)}
-            return {"jsonrpc": "2.0", "error": {"code": -32602, "message": "Invalid tool name: " + tool_id}, "id": request.get("id", 1)}
+                    response = {"jsonrpc": "2.0", "error": {"code": -32000, "message": "Tool call error: " + str(e)}, "id": request.get("id", 1)}
+                    logger.debug("Returning response for " + method + ": " + json.dumps(response))
+                    return response
+            response = {"jsonrpc": "2.0", "error": {"code": -32602, "message": "Invalid tool name: " + tool_id}, "id": request.get("id", 1)}
+            logger.debug("Returning response for " + method + ": " + json.dumps(response))
+            return response
         elif method == "prompts/list":
             prompts = [
                 {"name": "generate_greeting", "description": "Generates a prompt for creating a greeting in a specified style.", "arguments": [{"name": "name", "required": True}, {"name": "style", "required": False}]}
             ]
-            return {"jsonrpc": "2.0", "result": {"prompts": prompts}, "id": request.get("id", 1)}
+            response = {"jsonrpc": "2.0", "result": {"prompts": prompts}, "id": request.get("id", 1)}
+            logger.debug("Returning response for " + method + ": " + json.dumps(response))
+            return response
         elif method == "prompts/get":
             prompt_id = params.get("name", "")
             prompt_params = params.get("params", {})
@@ -160,9 +188,15 @@ class OsduMCPServer(Server):
                     "casual": "Write a relaxed and casual greeting"
                 }
                 style = prompt_params.get("style", "friendly")
-                return {"jsonrpc": "2.0", "result": styles.get(style, styles['friendly']) + " for " + prompt_params.get("name", "") + ".", "id": request.get("id", 1)}
-            return {"jsonrpc": "2.0", "error": {"code": -32602, "message": "Invalid prompt name: " + prompt_id}, "id": request.get("id", 1)}
-        return {"jsonrpc": "2.0", "error": {"code": -32601, "message": "Method not found: " + method}, "id": request.get("id", 1)}
+                response = {"jsonrpc": "2.0", "result": styles.get(style, styles['friendly']) + " for " + prompt_params.get("name", "") + ".", "id": request.get("id", 1)}
+                logger.debug("Returning response for " + method + ": " + json.dumps(response))
+                return response
+            response = {"jsonrpc": "2.0", "error": {"code": -32602, "message": "Invalid prompt name: " + prompt_id}, "id": request.get("id", 1)}
+            logger.debug("Returning response for " + method + ": " + json.dumps(response))
+            return response
+        response = {"jsonrpc": "2.0", "error": {"code": -32601, "message": "Method not found: " + method}, "id": request.get("id", 1)}
+        logger.debug("Returning response for " + method + ": " + json.dumps(response))
+        return response
 
 # Create MCP server
 mcp = OsduMCPServer(name="OsduMCPDemo", version="1.0.0")
@@ -199,11 +233,5 @@ app = Starlette(routes=[
 
 # Run the server
 if __name__ == "__main__":
-    logger.debug("Starting server")
-    try:
-        uvicorn.run(app, host="0.0.0.0", port=8000)
-    except NameError:
-        logger.warning("Uvicorn not available, falling back to Starlette server")
-        from starlette.routing import Mount
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(app.run(host="0.0.0.0", port=8000))
+    logger.debug("Starting Hypercorn server")
+    asyncio.run(hypercorn.asyncio.serve(app, Config.from_mapping({"bind": "0.0.0.0:8000"})))
