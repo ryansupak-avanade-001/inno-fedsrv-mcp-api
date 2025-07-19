@@ -3,9 +3,17 @@
 import os
 import json
 import logging
-import uvicorn
 import asyncio
-from mcp.server import Server
+# Ensure all dependencies are installed from requirements.txt
+try:
+    from mcp.server import Server
+except ImportError as e:
+    logger.error("Failed to import mcp.server: " + str(e))
+    raise
+try:
+    import uvicorn
+except ImportError as e:
+    logger.error("Uvicorn not found, falling back to Starlette server: " + str(e))
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.requests import Request
@@ -191,5 +199,11 @@ app = Starlette(routes=[
 
 # Run the server
 if __name__ == "__main__":
-    logger.debug("Starting Uvicorn server")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    logger.debug("Starting server")
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=8000)
+    except NameError:
+        logger.warning("Uvicorn not available, falling back to Starlette server")
+        from starlette.routing import Mount
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(app.run(host="0.0.0.0", port=8000))
