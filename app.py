@@ -4,22 +4,15 @@ import os
 import json
 import logging
 import asyncio
-# Ensure mcp[server]>=1.8.0 and hypercorn>=0.17.3 are installed in requirements.txt
+# Ensure mcp[server]>=1.8.0 is installed in requirements.txt
 try:
     from mcp.server import Server
 except ImportError as e:
     logger.error("Failed to import mcp.server: " + str(e))
     raise
-try:
-    import hypercorn.asyncio
-    from hypercorn.config import Config
-except ImportError as e:
-    logger.error("Hypercorn not found: " + str(e))
-    raise
-from starlette.applications import Starlette
-from starlette.routing import Route
-from starlette.requests import Request
-from starlette.responses import JSONResponse
+from fastapi import FastAPI, Request
+from pydantic import BaseModel
+import uvicorn
 
 # Set up logging to catch startup and request issues
 logging.basicConfig(level=logging.DEBUG)
@@ -201,37 +194,42 @@ class OsduMCPServer(Server):
 # Create MCP server
 mcp = OsduMCPServer(name="OsduMCPDemo", version="1.0.0")
 
+# Pydantic model for JSON-RPC requests
+class JsonRpcRequest(BaseModel):
+    jsonrpc: str
+    method: str
+    params: dict = {}
+    id: int = 1
+
+# Create FastAPI app
+app = FastAPI(title="OsduMCPDemo", version="1.0.0")
+
 # Add HTTP routes
-async def mcp_handler(request: Request):
+@app.post("/mcp/")
+async def mcp_handler(request: JsonRpcRequest):
     try:
-        payload = await request.body()
-        logger.debug("Received MCP request: " + payload.decode())
-        message = json.loads(payload.decode())
-        response = await mcp.handle_request(message)
+        logger.debug("Received MCP request: " + str(request.dict()))
+        response = await mcp.handle_request(request.dict())
         logger.debug("Sending MCP response: " + json.dumps(response))
-        return JSONResponse(response, headers={"Content-Type": "application/json"})
-    except json.JSONDecodeError as e:
+        return response
+    except ValueError as e:  # Pydantic will raise ValueError for JSON decode errors
         logger.error("Invalid JSON in request: " + str(e))
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+        return {"error": "Invalid JSON", "status_code": 400}
     except Exception as e:
         logger.error("MCP handler error: " + str(e))
-        return JSONResponse({"error": "Internal Server Error"}, status_code=500)
+        return {"error": "Internal Server Error", "status_code": 500}
 
-async def root(request):
+@app.get("/")
+async def root():
     status = "Data loaded successfully." if wells or trajectories or casings else "Data failed to load."
     counts = {
         "wells": len(wells),
         "trajectories": len(trajectories),
         "casings": len(casings)
     }
-    return JSONResponse({"status": status, "record_counts": counts})
-
-app = Starlette(routes=[
-    Route("/mcp/", mcp_handler, methods=["POST"]),
-    Route("/", root, methods=["GET"])
-])
+    return {"status": status, "record_counts": counts}
 
 # Run the server
 if __name__ == "__main__":
-    logger.debug("Starting Hypercorn server")
-    asyncio.run(hypercorn.asyncio.serve(app, Config.from_mapping({"bind": "0.0.0.0:8000"})))
+    logger.debug("Starting Uvicorn server")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
