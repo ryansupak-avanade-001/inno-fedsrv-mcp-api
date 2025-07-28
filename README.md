@@ -2,7 +2,7 @@ Filename: README.md
 
 # OsduMCPDemo - MCP Server Component
 
-The `OsduMCPDemo` is a fully-compliant MCP (Machine Communication Protocol) Server that implements all official core requirements. While designed as an extension for use with FedSrv, it can operate independently as a standalone MCP server. It provides access to OSDU (Open Subsurface Data Universe) data, including wells, wellbore trajectories, and casings, stored in a JSON file and served through a JSON-RPC interface over HTTP.
+The `OsduMCPDemo` is a fully-compliant MCP (Model Context Protocol) Server that implements all official core requirements. While designed as an extension for use with FedSrv, it can operate independently as a standalone MCP server. It provides access to OSDU (Open Subsurface Data Universe) data, including wells, wellbore trajectories, and casings, stored in a JSON file and served through a JSON-RPC interface over HTTP.
 
 This README provides detailed instructions for installing and running the server both locally and on Azure App Service, including startup commands and environment variables.
 
